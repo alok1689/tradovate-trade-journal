@@ -14,19 +14,20 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# File paths for local/persistent storage
+# File paths for persistent storage
 DB_FILE = "trade_history.csv"
+ACCOUNT_SNAPSHOT_FILE = "account_snapshots.csv"
 
 # Contract Multipliers mapping
 MULTIPLIERS = {
-    "MNQ": 2.0,   # Micro Nasdaq
-    "NQ": 20.0,   # E-mini Nasdaq
-    "MES": 5.0,   # Micro S&P
-    "ES": 50.0,   # E-mini S&P
-    "M2K": 5.0,   # Micro Russell
-    "RTY": 50.0,  # E-mini Russell
-    "MGC": 10.0,  # Micro Gold
-    "GC": 100.0,  # Gold
+    "MNQ": 2.0,   # Micro Nasdaq ($2/pt)
+    "NQ": 20.0,   # E-mini Nasdaq ($20/pt)
+    "MES": 5.0,   # Micro S&P ($5/pt)
+    "ES": 50.0,   # E-mini S&P ($50/pt)
+    "M2K": 5.0,   # Micro Russell ($5/pt)
+    "RTY": 50.0,  # E-mini Russell ($50/pt)
+    "MGC": 10.0,  # Micro Gold ($10/pt)
+    "GC": 100.0,  # Gold ($100/pt)
     "SIL": 1000.0 # Micro Silver
 }
 
@@ -53,20 +54,22 @@ def load_trade_db():
 def save_trade_db(df):
     df.to_csv(DB_FILE, index=False)
 
-def parse_tradovate_csv(orders_df, account_df=None):
+def parse_tradovate_multi_files(files_dict):
     """
-    Matches filled entry orders with filled exit orders to reconstruct trades.
+    Parses orders-all, account-info, and notifications-log files seamlessly.
     """
-    filled = orders_df[orders_df['Status'] == 'Filled'].copy()
-    if filled.empty:
-        return []
+    orders_df = files_dict.get('orders')
+    account_df = files_dict.get('account')
+    notifs_df = files_dict.get('notifications')
 
-    filled['Update Time'] = pd.to_datetime(filled['Update Time'])
-    filled = filled.sort_values('Update Time')
+    if orders_df is None or orders_df.empty:
+        return [], None
+
+    # Parse Orders
+    orders_df['Update Time'] = pd.to_datetime(orders_df['Update Time'])
+    filled = orders_df[orders_df['Status'] == 'Filled'].sort_values('Update Time').copy()
 
     trades = []
-    
-    # Simple pairing engine for single contract bracket orders
     open_positions = []
 
     for idx, row in filled.iterrows():
@@ -92,7 +95,6 @@ def parse_tradovate_csv(orders_df, account_df=None):
         
         # Exit Order (Stop Loss or Take Profit)
         elif order_type in ['Stop Loss', 'Take Profit'] and open_positions:
-            # Match with earliest open position of same symbol
             pos_idx = next((i for i, p in enumerate(open_positions) if p['symbol'] == symbol), None)
             if pos_idx is not None:
                 pos = open_positions.pop(pos_idx)
@@ -105,7 +107,7 @@ def parse_tradovate_csv(orders_df, account_df=None):
                 
                 gross_pnl = pnl_pts * mult * qty
                 
-                # Estimate commissions ~$1.90 roundtrip per micro contract
+                # Estimate commissions per contract
                 comm = 1.90 * qty
                 net_pnl = gross_pnl - comm
 
@@ -128,10 +130,18 @@ def parse_tradovate_csv(orders_df, account_df=None):
                     'Planned Reward ($)': abs(price - pos['entry_price']) * mult * qty if order_type == 'Take Profit' else 90.0,
                     'Gross PnL ($)': gross_pnl,
                     'Net PnL ($)': net_pnl,
-                    'Notes': 'Auto-parsed from Tradovate export'
+                    'Notes': 'Imported from Tradovate CSV'
                 })
 
-    return trades
+    account_metrics = None
+    if account_df is not None and not account_df.empty:
+        account_metrics = {
+            'Total P/L': float(account_df['Total P/L'].iloc[0]) if 'Total P/L' in account_df.columns else 0.0,
+            'Net Liq': float(account_df['Net Liq'].iloc[0]) if 'Net Liq' in account_df.columns else 0.0,
+            'Available Margin': float(account_df['Available Margin'].iloc[0]) if 'Available Margin' in account_df.columns else 0.0
+        }
+
+    return trades, account_metrics
 
 # Load Master DB
 db = load_trade_db()
@@ -140,21 +150,20 @@ db = load_trade_db()
 st.sidebar.title("📈 S&D Trading Journal")
 password = st.sidebar.text_input("Enter Passcode", type="password")
 
-# Passcode check (Change "supplydemand123" to your preferred password)
 if password != "supplydemand123":
     st.title("🔒 Supply & Demand Trade Journal")
     st.info("Please enter the passcode in the sidebar to access your trade dashboard.")
     st.stop()
 
 # --- NAVIGATION ---
-menu = st.sidebar.radio("Navigation", ["Dashboard", "Import Tradovate CSV", "Trade Log History", "Strategy Analytics"])
+menu = st.sidebar.radio("Navigation", ["Dashboard", "Import Multiple CSVs", "Trade Log History", "Strategy Analytics"])
 
 # --- TAB 1: DASHBOARD ---
 if menu == "Dashboard":
     st.title("📊 Supply & Demand Performance Dashboard")
     
     if db.empty:
-        st.warning("No trade data found. Please go to 'Import Tradovate CSV' to upload your trades.")
+        st.warning("No trade data found. Please go to 'Import Multiple CSVs' to upload your files.")
     else:
         # Top KPI Cards
         col1, col2, col3, col4, col5 = st.columns(5)
@@ -225,43 +234,54 @@ if menu == "Dashboard":
             )
             st.plotly_chart(fig_pie, use_container_width=True)
 
-# --- TAB 2: IMPORT TRADOVATE CSV ---
-elif menu == "Import Tradovate CSV":
-    st.title("📥 Import Tradovate Daily CSV Data")
-    st.write("Upload your `tradovate-orders-all-*.csv` file below to automatically extract filled trades and calculate metrics.")
+# --- TAB 2: IMPORT MULTIPLE CSVS ---
+elif menu == "Import Multiple CSVs":
+    st.title("📥 Import Tradovate Session Data")
+    st.write("Drag and drop **all 3 Tradovate CSV files** at once (`orders-all`, `account-info`, and `notifications-log`). The app will automatically identify and reconcile them.")
 
-    uploaded_file = st.file_uploader("Choose a Tradovate Orders CSV file", type=['csv'])
+    uploaded_files = st.file_uploader("Upload all Tradovate CSV files for today", type=['csv'], accept_multiple_files=True)
 
-    if uploaded_file is not None:
-        try:
-            orders_df = pd.read_csv(uploaded_file)
-            st.success("File uploaded successfully! Parsing execution log...")
-            
-            parsed_trades = parse_tradovate_csv(orders_df)
+    if uploaded_files:
+        files_dict = {}
+        for f in uploaded_files:
+            fname = f.name.lower()
+            df = pd.read_csv(f)
+            if 'orders-all' in fname or 'order' in fname:
+                files_dict['orders'] = df
+            elif 'account-info' in fname or 'account' in fname:
+                files_dict['account'] = df
+            elif 'notifications-log' in fname or 'notification' in fname:
+                files_dict['notifications'] = df
 
-            if not parsed_trades:
-                st.warning("No filled entries/exits matched in this CSV file.")
-            else:
+        st.info(f"Loaded {len(files_dict)} file type(s): " + ", ".join(files_dict.keys()))
+
+        if 'orders' in files_dict:
+            parsed_trades, acc_metrics = parse_tradovate_multi_files(files_dict)
+
+            if acc_metrics:
+                st.success(f"**Account Balance Sync**: Net Liq: ${acc_metrics['Net Liq']:,.2f} | Total Session P/L: ${acc_metrics['Total P/L']:,.2f}")
+
+            if parsed_trades:
                 parsed_df = pd.DataFrame(parsed_trades)
-                st.subheader("Preview Parsed Trades")
+                st.subheader("Reconciled Trades Preview")
                 st.dataframe(parsed_df)
 
-                if st.button("💾 Append & Save Trades to Master Database"):
-                    # Avoid duplicate records by checking Trade ID
+                if st.button("💾 Append & Save Session to Master Database"):
                     existing_ids = set(db['Trade ID']) if not db.empty else set()
                     new_trades = [t for t in parsed_trades if t['Trade ID'] not in existing_ids]
 
                     if not new_trades:
-                        st.info("All trades in this file are already saved in your database.")
+                        st.info("These trades are already saved in your database.")
                     else:
                         new_df = pd.DataFrame(new_trades)
                         updated_db = pd.concat([db, new_df], ignore_index=True)
                         save_trade_db(updated_db)
                         st.success(f"Successfully added {len(new_trades)} new trade(s) to your journal!")
                         st.balloons()
-
-        except Exception as e:
-            st.error(f"Error parsing file: {e}")
+            else:
+                st.warning("No matching filled trades were found in the uploaded orders file.")
+        else:
+            st.error("Please make sure to include the `tradovate-orders-all-*.csv` file in your selection.")
 
 # --- TAB 3: TRADE LOG HISTORY ---
 elif menu == "Trade Log History":
