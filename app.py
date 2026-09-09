@@ -16,7 +16,6 @@ st.set_page_config(
 
 # File paths for persistent storage
 DB_FILE = "trade_history.csv"
-ACCOUNT_SNAPSHOT_FILE = "account_snapshots.csv"
 
 # Contract Multipliers mapping
 MULTIPLIERS = {
@@ -38,21 +37,6 @@ def get_multiplier(symbol):
             return MULTIPLIERS[key]
     return 1.0
 
-def load_trade_db():
-    if os.path.exists(DB_FILE):
-        try:
-            df = pd.read_csv(DB_FILE)
-            if not df.empty and 'Date' in df.columns:
-                # Use errors='coerce' to safely parse mixed or invalid dates without throwing ValueError
-                df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-                # Replace any unparseable dates with today's date
-                df['Date'] = df['Date'].fillna(pd.Timestamp.now().strftime('%Y-%m-%d'))
-            return df
-        except pd.errors.EmptyDataError:
-            # Handle case where trade_history.csv exists but is empty
-            return create_empty_trade_df()
-    return create_empty_trade_df()
-
 def create_empty_trade_df():
     return pd.DataFrame(columns=[
         'Trade ID', 'Date', 'Symbol', 'Side', 'Zone Type', 'Timeframe', 
@@ -61,18 +45,28 @@ def create_empty_trade_df():
         'Planned Reward ($)', 'Gross PnL ($)', 'Net PnL ($)', 'Notes'
     ])
 
+def load_trade_db():
+    if os.path.exists(DB_FILE):
+        try:
+            df = pd.read_csv(DB_FILE)
+            if not df.empty and 'Date' in df.columns:
+                df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+                df['Date'] = df['Date'].fillna(pd.Timestamp.now().strftime('%Y-%m-%d'))
+            return df
+        except pd.errors.EmptyDataError:
+            return create_empty_trade_df()
+    return create_empty_trade_df()
+
+def save_trade_db(df):
+    df.to_csv(DB_FILE, index=False)
+
 def parse_tradovate_multi_files(files_dict):
-    """
-    Parses orders-all, account-info, and notifications-log files seamlessly.
-    """
     orders_df = files_dict.get('orders')
     account_df = files_dict.get('account')
-    notifs_df = files_dict.get('notifications')
 
     if orders_df is None or orders_df.empty:
         return [], None
 
-    # Parse Orders
     orders_df['Update Time'] = pd.to_datetime(orders_df['Update Time'])
     filled = orders_df[orders_df['Status'] == 'Filled'].sort_values('Update Time').copy()
 
@@ -88,7 +82,6 @@ def parse_tradovate_multi_files(files_dict):
         qty = float(row['Qty'])
         mult = get_multiplier(symbol)
 
-        # Entry Order (Limit or Market)
         if order_type in ['Limit', 'Market']:
             open_positions.append({
                 'symbol': symbol,
@@ -99,22 +92,17 @@ def parse_tradovate_multi_files(files_dict):
                 'multiplier': mult,
                 'order_id': row['Order ID']
             })
-        
-        # Exit Order (Stop Loss or Take Profit)
         elif order_type in ['Stop Loss', 'Take Profit'] and open_positions:
             pos_idx = next((i for i, p in enumerate(open_positions) if p['symbol'] == symbol), None)
             if pos_idx is not None:
                 pos = open_positions.pop(pos_idx)
                 
-                # Determine PnL
                 if pos['side'] == 'Short':
                     pnl_pts = pos['entry_price'] - price
                 else:
                     pnl_pts = price - pos['entry_price']
                 
                 gross_pnl = pnl_pts * mult * qty
-                
-                # Estimate commissions per contract
                 comm = 1.90 * qty
                 net_pnl = gross_pnl - comm
 
@@ -172,7 +160,6 @@ if menu == "Dashboard":
     if db.empty:
         st.warning("No trade data found. Please go to 'Import Multiple CSVs' to upload your files.")
     else:
-        # Top KPI Cards
         col1, col2, col3, col4, col5 = st.columns(5)
         
         total_pnl = db['Net PnL ($)'].sum()
@@ -197,7 +184,6 @@ if menu == "Dashboard":
 
         st.markdown("---")
 
-        # Equity Curve Chart
         st.subheader("📈 Cumulative Equity Curve")
         db_sorted = db.sort_values('Date').copy()
         db_sorted['Cumulative Net PnL'] = db_sorted['Net PnL ($)'].cumsum()
@@ -213,7 +199,6 @@ if menu == "Dashboard":
         fig_equity.update_traces(line_color='#2962FF', line_width=3)
         st.plotly_chart(fig_equity, use_container_width=True)
 
-        # Breakdowns
         col_a, col_b = st.columns(2)
         
         with col_a:
@@ -248,31 +233,29 @@ elif menu == "Import Multiple CSVs":
 
     uploaded_files = st.file_uploader("Upload all Tradovate CSV files for today", type=['csv'], accept_multiple_files=True)
 
-    # NEW CODE (Handles empty files gracefully)
-if uploaded_files:
-    files_dict = {}
-    for f in uploaded_files:
-        fname = f.name.lower()
-        
-        # Check if file is empty before reading
-        if f.size == 0:
-            st.warning(f"Skipping empty file: `{f.name}`")
-            continue
+    if uploaded_files:
+        files_dict = {}
+        for f in uploaded_files:
+            fname = f.name.lower()
             
-        try:
-            df = pd.read_csv(f)
-            if df.empty:
+            if f.size == 0:
+                st.warning(f"Skipping empty file: `{f.name}`")
                 continue
                 
-            if 'orders-all' in fname or 'order' in fname:
-                files_dict['orders'] = df
-            elif 'account-info' in fname or 'account' in fname:
-                files_dict['account'] = df
-            elif 'notifications-log' in fname or 'notification' in fname:
-                files_dict['notifications'] = df
-        except pd.errors.EmptyDataError:
-            st.warning(f"Skipping empty or corrupted CSV file: `{f.name}`")
-            continue
+            try:
+                df = pd.read_csv(f)
+                if df.empty:
+                    continue
+                    
+                if 'orders-all' in fname or 'order' in fname:
+                    files_dict['orders'] = df
+                elif 'account-info' in fname or 'account' in fname:
+                    files_dict['account'] = df
+                elif 'notifications-log' in fname or 'notification' in fname:
+                    files_dict['notifications'] = df
+            except pd.errors.EmptyDataError:
+                st.warning(f"Skipping empty CSV file: `{f.name}`")
+                continue
 
         st.info(f"Loaded {len(files_dict)} file type(s): " + ", ".join(files_dict.keys()))
 
