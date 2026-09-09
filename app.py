@@ -40,19 +40,26 @@ def get_multiplier(symbol):
 
 def load_trade_db():
     if os.path.exists(DB_FILE):
-        df = pd.read_csv(DB_FILE)
-        df['Date'] = pd.to_datetime(df['Date'])
-        return df
-    else:
-        return pd.DataFrame(columns=[
-            'Trade ID', 'Date', 'Symbol', 'Side', 'Zone Type', 'Timeframe', 
-            'Qty', 'Entry Time', 'Exit Time', 'Entry Price', 'Exit Price', 
-            'Planned SL', 'Planned TP', 'Exit Reason', 'Planned Risk ($)', 
-            'Planned Reward ($)', 'Gross PnL ($)', 'Net PnL ($)', 'Notes'
-        ])
+        try:
+            df = pd.read_csv(DB_FILE)
+            if not df.empty and 'Date' in df.columns:
+                # Use errors='coerce' to safely parse mixed or invalid dates without throwing ValueError
+                df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+                # Replace any unparseable dates with today's date
+                df['Date'] = df['Date'].fillna(pd.Timestamp.now().strftime('%Y-%m-%d'))
+            return df
+        except pd.errors.EmptyDataError:
+            # Handle case where trade_history.csv exists but is empty
+            return create_empty_trade_df()
+    return create_empty_trade_df()
 
-def save_trade_db(df):
-    df.to_csv(DB_FILE, index=False)
+def create_empty_trade_df():
+    return pd.DataFrame(columns=[
+        'Trade ID', 'Date', 'Symbol', 'Side', 'Zone Type', 'Timeframe', 
+        'Qty', 'Entry Time', 'Exit Time', 'Entry Price', 'Exit Price', 
+        'Planned SL', 'Planned TP', 'Exit Reason', 'Planned Risk ($)', 
+        'Planned Reward ($)', 'Gross PnL ($)', 'Net PnL ($)', 'Notes'
+    ])
 
 def parse_tradovate_multi_files(files_dict):
     """
