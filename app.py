@@ -241,17 +241,31 @@ elif menu == "Import Multiple CSVs":
 
     uploaded_files = st.file_uploader("Upload all Tradovate CSV files for today", type=['csv'], accept_multiple_files=True)
 
-    if uploaded_files:
-        files_dict = {}
-        for f in uploaded_files:
-            fname = f.name.lower()
+    # NEW CODE (Handles empty files gracefully)
+if uploaded_files:
+    files_dict = {}
+    for f in uploaded_files:
+        fname = f.name.lower()
+        
+        # Check if file is empty before reading
+        if f.size == 0:
+            st.warning(f"Skipping empty file: `{f.name}`")
+            continue
+            
+        try:
             df = pd.read_csv(f)
+            if df.empty:
+                continue
+                
             if 'orders-all' in fname or 'order' in fname:
                 files_dict['orders'] = df
             elif 'account-info' in fname or 'account' in fname:
                 files_dict['account'] = df
             elif 'notifications-log' in fname or 'notification' in fname:
                 files_dict['notifications'] = df
+        except pd.errors.EmptyDataError:
+            st.warning(f"Skipping empty or corrupted CSV file: `{f.name}`")
+            continue
 
         st.info(f"Loaded {len(files_dict)} file type(s): " + ", ".join(files_dict.keys()))
 
